@@ -1,0 +1,25 @@
+{
+  "_doc": "Prompts y nivel esperado. Los ejecutan el clasificador Python (tests/test_parity_fixtures.py) y el del mod en TypeScript (tests/test_classify_ts.mjs): si divergen, falla CI. 'forced' marca un prefijo manual. 'build' construye un prompt largo: prefix + fill repetido 'times' veces.",
+  "cases": [
+    { "prompt": "Renombra la variable x a total", "tier": "haiku" },
+    { "prompt": "formatea este JSON", "tier": "haiku" },
+    { "prompt": "Quita espacios y elimina duplicados", "tier": "haiku" },
+    { "prompt": "traduce al inglés este párrafo", "tier": "haiku" },
+    { "prompt": "Corrige la ortografía", "tier": "haiku" },
+    { "prompt": "Implementa una función que valide emails", "tier": "sonnet" },
+    { "prompt": "Dame información sobre el formato", "tier": "sonnet" },
+    { "prompt": "", "tier": "sonnet" },
+    { "prompt": "Diseña la arquitectura del sistema de pagos", "tier": "opus" },
+    { "prompt": "hay una race condition en el worker", "tier": "opus" },
+    { "prompt": "¿Cómo funciona un deadlock?", "tier": "opus" },
+    { "prompt": "Refactorizar todo el backend", "tier": "opus" },
+    { "prompt": "renombra el módulo y rediseña la arquitectura", "tier": "opus" },
+    { "prompt": "ARQUITECTURA", "tier": "opus" },
+    { "prompt": "Diseño del sistema", "tier": "opus" },
+    { "prompt": "!opus arregla este bug", "tier": "opus", "forced": true },
+    { "prompt": "!HAIKU diseña la arquitectura", "tier": "haiku", "forced": true },
+    { "prompt": "  !sonnet renombra esto", "tier": "sonnet", "forced": true },
+    { "build": { "prefix": "renombra ", "fill": "x", "times": 1500 }, "tier": "sonnet" },
+    { "build": { "prefix": "renombra ", "fill": "😀", "times": 800 }, "tier": "haiku" }
+  ]
+}

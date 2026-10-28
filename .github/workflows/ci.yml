@@ -23,3 +23,15 @@ jobs:
           python -m json.tool .claude/router/rules.json > /dev/null
       - name: Tests
         run: python -m unittest discover -s tests -v
+
+  mod:
+    # El clasificador del mod (TypeScript) contra los mismos fixtures que el de
+    # Python. Node 22.18+ ejecuta .ts sin flags.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Paridad con el clasificador Python
+        run: node --test tests/test_classify_ts.mjs
