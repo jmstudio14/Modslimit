@@ -4,6 +4,8 @@ export type Route = {
   model: 'haiku' | 'sonnet' | 'opus' | null
   isForced: boolean
   reason: string
+  // Prompts enviados en la sesión al decidir; null si no se pudo medir.
+  turns: number | null
 }
 
 declare module 'claude-code' {

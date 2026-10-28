@@ -1,15 +1,15 @@
 {
   "name": "modslimit-router",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": { "name": "jmstudio14" },
   "description": "Elige Haiku, Sonnet u Opus para cada turno según la complejidad del prompt.",
   "types": "./types/index.d.ts",
   "userConfig": {
-    "maxContextMessages": {
+    "maxTurnsToDownshift": {
       "type": "number",
-      "title": "Mensajes máximos para bajar a Haiku",
-      "description": "Con más mensajes que esto en la conversación no se baja de modelo, salvo que fuerces el nivel con !haiku: cambiar de modelo obliga a volver a pagar todo el contexto.",
-      "default": 12,
+      "title": "Prompts máximos para bajar a Haiku",
+      "description": "Con más prompts que esto en la sesión no se baja a Haiku, salvo que fuerces el nivel con !haiku: cambiar de modelo obliga a volver a pagar todo el contexto de la conversación.",
+      "default": 6,
       "min": 0
     }
   }

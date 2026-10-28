@@ -1,14 +1,11 @@
-// Port de .claude/router/classify.py. Los dos deben dar el mismo nivel para el
-// mismo prompt: tests/fixtures/prompts.json lo comprueba en CI.
+// Clasificación por palabras clave, local y sin llamadas a la API. Los casos de
+// tests/fixtures/prompts.json fijan su comportamiento y los ejecuta CI.
 export type Tier = 'haiku' | 'sonnet' | 'opus'
 
 export type Rules = {
   default_tier: Tier
   overrides: Record<string, Tier>
-  tiers: Record<
-    'opus' | 'haiku',
-    { agent: string; min_hits: number; keywords: string[] }
-  >
+  tiers: Record<'opus' | 'haiku', { min_hits: number; keywords: string[] }>
   max_prompt_chars_for_haiku: number
 }
 
@@ -19,7 +16,7 @@ export type Verdict = {
   reason: string
 }
 
-// Minúsculas, sin tildes: el mismo plegado que usa classify.py.
+// Minúsculas y sin tildes, para que 'Diseño' y 'diseno' coincidan.
 export function normalize(text: string): string {
   return text
     .toLowerCase()
