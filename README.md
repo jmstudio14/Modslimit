@@ -12,10 +12,10 @@
 ## Índice
 
 - [Descripción general](#descripción-general)
-- [Arquitectura](#arquitectura)
 - [Mod experimental](#mod-modslimit-router-experimental)
+- [Alternativa sin mods: hook y subagentes](#alternativa-sin-mods-hook-y-subagentes)
 - [Requisitos](#requisitos)
-- [Instalación](#instalación)
+- [Instalación de la alternativa con hook](#instalación-de-la-alternativa-con-hook)
 - [Verificación](#verificación)
 - [Uso](#uso)
 - [Configuración](#configuración)
@@ -37,19 +37,77 @@ Modslimit clasifica cada prompt en uno de tres niveles y dirige el trabajo al mo
 | **Estándar** *(por defecto)* | Claude Sonnet | Desarrollo de funciones, corrección de errores, tests, lógica de negocio | Resolución directa en la sesión principal |
 | **Crítico** | Claude Opus | Diseño de arquitectura, refactorización a gran escala, algoritmos avanzados, concurrencia | Opus diseña el plan; Sonnet lo ejecuta |
 
+**Dos vías, un mismo conjunto de reglas**
+
+| Vía | Cómo actúa | Cuándo usarla |
+|-----|------------|---------------|
+| **Mod** *(recomendada)* | Cambia de verdad el modelo de cada turno | Claude Code 2.1.275 o posterior, con soporte de mods |
+| **Hook y subagentes** | Sugiere un nivel y pide al modelo que delegue | Cualquier versión, sin mods |
+
 **Características principales**
 
 - Clasificación local y determinista: sin llamadas a la API ni latencia añadida.
 - Reglas configurables en un único archivo JSON.
 - Selección manual del nivel mediante prefijos (`!haiku`, `!sonnet`, `!opus`).
-- Escalado automático: los subagentes devuelven `ESCALAR` cuando una tarea supera su nivel.
-- Tolerante a fallos: un error del clasificador nunca bloquea el prompt.
+- Escalado automático *(vía hook)*: los subagentes devuelven `ESCALAR` cuando una tarea supera su nivel.
+- Tolerante a fallos: un error del clasificador nunca bloquea el prompt y el turno sigue con el modelo de la sesión.
 
 ---
 
-## Arquitectura
+## Mod `modslimit-router` (experimental)
 
-Con hooks, Claude Code no puede cambiar el modelo de la sesión principal en cada prompt. La vía compatible con cualquier versión combina tres mecanismos nativos para lograr un efecto equivalente; en versiones con soporte de mods existe además una vía que sí cambia el modelo ([ver más abajo](#mod-modslimit-router-experimental)):
+En versiones de Claude Code con soporte de mods, `mods/modslimit-router/` **elige** el modelo en lugar de sugerirlo. Es la corrección del punto débil del hook: la recomendación del hook depende de que el modelo la obedezca; el mod no.
+
+| Evento | Qué hace |
+|--------|----------|
+| `turn.start` | Clasifica el prompt con las mismas reglas que el hook y guarda la decisión en el estado de la sesión |
+| `turn.step` | Reescribe el modelo de cada petición del turno. La decisión se toma una vez por turno y vale para todos sus pasos |
+| `turn.complete` | Anota los tokens reales de cada turno (últimos 200) para poder medir el ahorro |
+| `/router-stats` | Muestra turnos y tokens por nivel |
+
+**Salvaguardas.** No baja a Haiku si la conversación supera `maxContextMessages` mensajes (12 por defecto, configurable), salvo que fuerces el nivel con `!haiku`. No toca los subagentes, ni los comandos de barra, ni los turnos sin prompt escrito. Si algo falla, el turno sigue con el modelo de la sesión. Según el validador, el mod solo usa `$.state`, `$.store`, `$.clock`, `$.command` y `$.ui`: no accede a red, procesos ni archivos.
+
+### Instalación
+
+```
+/plugin install modslimit-router --marketplace jmstudio14/Modslimit
+```
+
+Desde un terminal, sin abrir Claude Code: `claude plugin install modslimit-router --marketplace jmstudio14/Modslimit`. En la app de escritorio, donde `/plugin` no funciona: **+** junto al cuadro de texto, **Plugins**, **Add marketplace** con `jmstudio14/Modslimit`, y después **Add plugin**.
+
+Verás, por orden: `Add marketplace?` (responde `y`), los detalles del plugin con el ámbito de usuario primero (Enter), una pantalla para fijar `maxContextMessages` y, al final, `Installed modslimit-router. Plugin is now active.` Se activa en la sesión actual sin reiniciar.
+
+Para probarlo sin instalarlo, o mientras lo modificas: `claude --plugin-dir mods/modslimit-router`.
+
+### Verificado en una sesión real
+
+Se ejecutó `claude -p` con el mod cargado desde una carpeta sin hook ni `CLAUDE.md`, y se leyó a qué modelo fue la petición principal (el prompt fijo de Claude Code, unos 43 000 tokens). Un control sin el mod da la referencia:
+
+| Prompt | Mod | Modelo de la petición principal | Coste según la CLI |
+|--------|-----|--------------------------------|--------------------|
+| `Renombra la variable x a total…` | no | Sonnet | 0,071 $ |
+| `Renombra la variable x a total…` | sí | **Haiku** | 0,004 $ |
+| `Implementa una función Python que sume dos números` | sí | Sonnet (sin cambio) | 0,076 $ |
+| `!opus responde solo OK` | sí | **Opus** | 0,141 $ |
+
+Haiku aparece también en el control, pero con unos 1 200 tokens: es el que Claude Code usa para sus tareas internas. Lo que prueba el enrutamiento es dónde fue la petición grande.
+
+**Lo que esta prueba no cubre.** Es una sola ejecución por caso. El coste lo calcula la propia CLI, no es facturación. Y son turnos sueltos: no mide qué pasa con la caché de prompt en una conversación larga que cambia de modelo, que es el riesgo principal de abajo.
+
+> **Usa el mod o la alternativa con hook, no las dos.** Con el mod activo el modelo del turno ya está elegido; si el hook y `CLAUDE.md` siguen pidiendo delegar en `haiku-simple` u `opus-critical`, el subagente se suma al cambio de modelo y el trabajo se paga dos veces. Si ya habías copiado la alternativa a tu proyecto, quita el bloque `hooks` de `.claude/settings.json` y la tabla de enrutamiento de `CLAUDE.md` antes de instalar el mod. Instalarlo desde el marketplace no copia nada de eso.
+
+**Estado y riesgos**
+
+- **API temprana.** Los mods son recientes y su documentación avisa de que la API puede cambiar sin previo aviso. El mod está verificado con Claude Code 2.1.312.
+- **Cambiar de modelo tiene un coste.** La caché de prompt no se comparte entre modelos, así que cada cambio obliga a volver a pagar el contexto. De ahí la decisión por turno y el límite de contexto para bajar a Haiku. Si ese umbral es demasiado alto, el cambio puede salir más caro que no hacerlo.
+- **El ahorro no está medido.** `/router-stats` da los tokens por nivel, no el coste: no incluye precios a propósito, porque se quedarían obsoletos. Compáralo con `/cost` antes de fiarte.
+- **Dos clasificadores.** El hook (Python) y el mod (TypeScript) implementan las mismas reglas. Los fixtures de `tests/fixtures/prompts.json` y la comprobación de `rules.ts` en CI evitan que diverjan.
+
+---
+
+## Alternativa sin mods: hook y subagentes
+
+Con hooks, Claude Code no puede cambiar el modelo de la sesión principal en cada prompt. Esta vía, compatible con cualquier versión, combina tres mecanismos nativos para lograr un efecto equivalente. Si tu versión admite mods, usa [el mod](#mod-modslimit-router-experimental), que sí cambia el modelo:
 
 ```
                 ┌─────────────────────────┐
@@ -82,46 +140,18 @@ Con hooks, Claude Code no puede cambiar el modelo de la sesión principal en cad
 
 ---
 
-## Mod `modslimit-router` (experimental)
-
-En versiones de Claude Code con soporte de mods, `mods/modslimit-router/` **elige** el modelo en lugar de sugerirlo. Es la corrección del punto débil del hook: la recomendación del hook depende de que el modelo la obedezca; el mod no.
-
-| Evento | Qué hace |
-|--------|----------|
-| `turn.start` | Clasifica el prompt con las mismas reglas que el hook y guarda la decisión en el estado de la sesión |
-| `turn.step` | Reescribe el modelo de cada petición del turno. La decisión se toma una vez por turno y vale para todos sus pasos |
-| `turn.complete` | Anota los tokens reales de cada turno (últimos 200) para poder medir el ahorro |
-| `/router-stats` | Muestra turnos y tokens por nivel |
-
-**Salvaguardas.** No baja a Haiku si la conversación supera `maxContextMessages` mensajes (12 por defecto, configurable), salvo que fuerces el nivel con `!haiku`. No toca los subagentes, ni los comandos de barra, ni los turnos sin prompt escrito. Si algo falla, el turno sigue con el modelo de la sesión. Según el validador, el mod solo usa `$.state`, `$.store`, `$.clock`, `$.command` y `$.ui`: no accede a red, procesos ni archivos.
-
-**Probarlo** sin instalarlo:
-
-```bash
-claude --plugin-dir mods/modslimit-router
-```
-
-> **Usa el hook o el mod, no los dos.** Con el mod activo el modelo del turno ya está elegido; si el hook y `CLAUDE.md` siguen pidiendo delegar en `haiku-simple` u `opus-critical`, el subagente se suma al cambio de modelo y el trabajo se paga dos veces. Para usar el mod, quita el bloque `hooks` de `.claude/settings.json` y la tabla de enrutamiento de `CLAUDE.md`.
-
-**Estado y riesgos**
-
-- **API temprana.** Los mods son recientes y su documentación avisa de que la API puede cambiar sin previo aviso. El mod está verificado con Claude Code 2.1.312.
-- **Cambiar de modelo tiene un coste.** La caché de prompt no se comparte entre modelos, así que cada cambio obliga a volver a pagar el contexto. De ahí la decisión por turno y el límite de contexto para bajar a Haiku. Si ese umbral es demasiado alto, el cambio puede salir más caro que no hacerlo.
-- **El ahorro no está medido.** `/router-stats` da los tokens por nivel, no el coste: no incluye precios a propósito, porque se quedarían obsoletos. Compáralo con `/cost` antes de fiarte.
-- **Dos clasificadores.** El hook (Python) y el mod (TypeScript) implementan las mismas reglas. Los fixtures de `tests/fixtures/prompts.json` y la comprobación de `rules.ts` en CI evitan que diverjan.
-
----
-
 ## Requisitos
 
 - [Claude Code](https://code.claude.com) con soporte de hooks y subagentes.
 - Python 3.10 o superior disponible como `python3` en el `PATH`.
 - Sin dependencias externas: solo biblioteca estándar.
-- Para el mod: una versión de Claude Code con soporte de mods. Node 22.18 o superior solo hace falta para los tests de paridad.
+- Para el mod: Claude Code 2.1.275 o posterior, con soporte de mods (verificado con la 2.1.312). Node 22.18 o superior solo hace falta para los tests de paridad.
 
 ---
 
-## Instalación
+## Instalación de la alternativa con hook
+
+Solo si no usas el mod:
 
 ```bash
 git clone https://github.com/jmstudio14/Modslimit.git
@@ -135,6 +165,10 @@ Inicia Claude Code en el directorio del proyecto. La primera vez puede solicitar
 ---
 
 ## Verificación
+
+**Del mod:** tras instalarlo, envía un prompt simple (`Renombra la variable x a total`) y comprueba que la barra de estado dice `router: haiku`. Con `/router-stats` verás los tokens por nivel de los últimos turnos.
+
+**De la alternativa con hook:**
 
 | Comprobación | Resultado esperado |
 |--------------|--------------------|

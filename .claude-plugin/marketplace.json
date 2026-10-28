@@ -1,0 +1,14 @@
+{
+  "name": "modslimit",
+  "owner": {
+    "name": "jmstudio14"
+  },
+  "description": "Mods para reducir el consumo de Claude Code eligiendo el modelo según la tarea.",
+  "plugins": [
+    {
+      "name": "modslimit-router",
+      "source": "./mods/modslimit-router",
+      "description": "Elige Haiku, Sonnet u Opus para cada turno según la complejidad del prompt."
+    }
+  ]
+}
