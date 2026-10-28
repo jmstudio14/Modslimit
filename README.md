@@ -2,8 +2,9 @@
 
 **Enrutamiento de modelos por complejidad para Claude Code.** Asigna cada tarea al modelo adecuado —Haiku, Sonnet u Opus— para reducir el consumo de cuota y coste sin renunciar a calidad en el trabajo crítico.
 
+[![CI](https://github.com/jmstudio14/Modslimit/actions/workflows/ci.yml/badge.svg)](https://github.com/jmstudio14/Modslimit/actions/workflows/ci.yml)
 [![Licencia: MIT](https://img.shields.io/badge/licencia-MIT-blue.svg)](LICENSE)
-![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-3776AB.svg)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB.svg)
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-hooks%20%26%20subagents-D97757.svg)
 
 ---
@@ -19,6 +20,7 @@
 - [Configuración](#configuración)
 - [Solución de problemas](#solución-de-problemas)
 - [Limitaciones conocidas](#limitaciones-conocidas)
+- [Desarrollo](#desarrollo)
 - [Contribuir](#contribuir)
 - [Licencia](#licencia)
 
@@ -70,6 +72,8 @@ Claude Code no permite cambiar el modelo de la sesión principal en cada prompt.
 | Reglas | `.claude/router/rules.json` | Palabras clave, nivel por defecto y prefijos manuales |
 | Subagentes | `.claude/agents/*.md` | Agentes con modelo fijo: `haiku-simple`, `sonnet-standard`, `opus-critical` |
 | Política | `CLAUDE.md` | Instrucciones de enrutamiento para la sesión principal |
+| Tests | `tests/` | Suite de verificación del clasificador y la configuración |
+| CI | `.github/workflows/ci.yml` | Ejecución automática de la suite en cada cambio |
 
 > **Nota:** fijar Sonnet como modelo principal es, por sí solo, la medida de mayor impacto en el consumo. El enrutamiento por niveles optimiza el resto.
 
@@ -78,7 +82,7 @@ Claude Code no permite cambiar el modelo de la sesión principal en cada prompt.
 ## Requisitos
 
 - [Claude Code](https://code.claude.com) con soporte de hooks y subagentes.
-- Python 3.8 o superior disponible como `python3` en el `PATH`.
+- Python 3.10 o superior disponible como `python3` en el `PATH`.
 - Sin dependencias externas: solo biblioteca estándar.
 
 ---
@@ -163,9 +167,26 @@ Todas las reglas residen en `.claude/router/rules.json`:
 
 ---
 
+## Desarrollo
+
+La suite de tests usa solo `unittest` de la biblioteca estándar:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+| Suite | Cubre |
+|-------|-------|
+| `tests/test_classify.py` | Asignación de niveles, prioridad Opus > Haiku, insensibilidad a mayúsculas y tildes, prefijos manuales, límite de longitud, regresiones de falsos positivos y comportamiento del hook ante entradas vacías, comandos de barra o JSON inválido |
+| `tests/test_config.py` | Coherencia entre `settings.json`, `rules.json` y los subagentes: modelos válidos, agentes existentes, *frontmatter* correcto y palabras clave sin duplicados |
+
+GitHub Actions (`.github/workflows/ci.yml`) valida los JSON y ejecuta la suite con Python 3.10 y 3.13 en cada *pull request* y en cada *push* a `main`.
+
+---
+
 ## Contribuir
 
-Las propuestas de mejora son bienvenidas mediante *issues* o *pull requests*. Para cambios en las reglas, incluye ejemplos de prompts mal clasificados y el resultado esperado.
+Las propuestas de mejora son bienvenidas mediante *issues* o *pull requests*. Para cambios en las reglas, añade a `tests/test_classify.py` los prompts mal clasificados con su nivel esperado y comprueba que la suite pasa.
 
 ---
 
