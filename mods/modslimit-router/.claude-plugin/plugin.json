@@ -1,6 +1,6 @@
 {
   "name": "modslimit-router",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": { "name": "jmstudio14" },
   "description": "Elige Haiku, Sonnet u Opus para cada turno según la complejidad del prompt.",
   "types": "./types/index.d.ts",
@@ -11,6 +11,13 @@
       "description": "Con más prompts que esto en la sesión no se baja a Haiku, salvo que fuerces el nivel con !haiku: cambiar de modelo obliga a volver a pagar todo el contexto de la conversación.",
       "default": 6,
       "min": 0
+    },
+    "standardModel": {
+      "type": "string",
+      "title": "Modelo de las tareas estándar",
+      "description": "sonnet: las tareas estándar usan Sonnet siempre, aunque la sesión arranque con otro modelo. session: no se toca el modelo de la sesión; al reanudar una sesión, ese modelo es el del último turno, que puede haber sido Haiku u Opus por el mod.",
+      "default": "sonnet",
+      "options": ["sonnet", "session"]
     }
   }
 }
