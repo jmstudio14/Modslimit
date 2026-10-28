@@ -19,32 +19,15 @@ type TurnRecord = {
   cacheWrite: number
 }
 
-type Step = { turnId: string; index: number; model: string; messageCount: number }
+type Step = { turnId: string; index: number; model: string }
 
 // Nivel que corresponde al modelo que el motor dice usar en este paso; undefined
 // si el id no menciona ninguno.
 const tierOf = (model: string): Tier | undefined =>
   (['haiku', 'sonnet', 'opus'] as const).find(t => model.includes(t))
 
-function decide(turnId: string, text: string): Route | null {
-  // Un turno sin prompt escrito (continuación) o un comando no se enrutan.
-  if (text.trim() === '' || text.trimStart().startsWith('/')) return null
-
-  const verdict = classify(text, RULES)
-  // El nivel por defecto es "lo que ya usa la sesión": no se toca, salvo que
-  // lo fuerce el usuario con !sonnet.
-  const isDefault = verdict.tier === RULES.default_tier && !verdict.isForced
-
-  return {
-    turnId,
-    model: isDefault ? null : verdict.tier,
-    isForced: verdict.isForced,
-    reason: verdict.reason,
-  }
-}
-
 // La barra de estado y el aviso son cosméticos: si fallan no deben anular el
-// enrutamiento, por eso van aparte del resto de modelFor.
+// enrutamiento, por eso van aparte de la lógica que decide.
 function announce($: EngineInterface, status: string, toast?: string): void {
   try {
     $.ui.status(status)
@@ -54,13 +37,56 @@ function announce($: EngineInterface, status: string, toast?: string): void {
   }
 }
 
+// Prompts que la persona ha enviado en esta sesión. No se mide con el número
+// de mensajes de la petición: ese incluye el contexto que inyecta el motor
+// (CLAUDE.md, avisos, salida de hooks) y una sesión recién abierta ya puede
+// superar cualquier umbral razonable.
+async function countTurns($: EngineInterface): Promise<number | null> {
+  try {
+    return await $.session.turns()
+  } catch {
+    return null
+  }
+}
+
+// Decide el modelo del turno entero, una sola vez, al empezar.
+async function decide(
+  $: EngineInterface,
+  turnId: string,
+  text: string,
+  maxTurnsToDownshift: number,
+): Promise<Route | null> {
+  // Un turno sin prompt escrito (continuación) o un comando no se enrutan.
+  if (text.trim() === '' || text.trimStart().startsWith('/')) return null
+
+  const verdict = classify(text, RULES)
+  const turns = await countTurns($)
+  // El nivel por defecto es "lo que ya usa la sesión": no se toca, salvo que
+  // lo fuerce el usuario con !sonnet.
+  const isDefault = verdict.tier === RULES.default_tier && !verdict.isForced
+  // Bajar de modelo en una conversación larga sale caro: hay que volver a pagar
+  // todo el contexto en el modelo nuevo. Si no se puede medir, se asume larga.
+  const isTooLong =
+    verdict.tier === 'haiku' &&
+    !verdict.isForced &&
+    (turns === null || turns > maxTurnsToDownshift)
+
+  if (isTooLong) {
+    announce($, `router: sin cambio, conversación larga${turns === null ? '' : ` · turno ${turns}`}`)
+  }
+
+  return {
+    turnId,
+    model: isDefault || isTooLong ? null : verdict.tier,
+    isForced: verdict.isForced,
+    reason: verdict.reason,
+    turns,
+  }
+}
+
 // Modelo que debe llevar este paso, o undefined para dejar el de la sesión.
 // Falla abierto: ante cualquier error el turno sigue como si el mod no estuviera.
-async function modelFor(
-  $: EngineInterface,
-  e: Step,
-  maxContextMessages: number,
-): Promise<Tier | undefined> {
+async function modelFor($: EngineInterface, e: Step): Promise<Tier | undefined> {
   try {
     const { value: route } = await $.state.get(ROUTE)
 
@@ -68,25 +94,10 @@ async function modelFor(
       return undefined
     }
 
-    // Bajar de modelo con mucho contexto sale caro: hay que volver a pagar
-    // todo el prefijo en el modelo nuevo. Se decide en el primer paso y vale
-    // para el turno entero.
-    if (
-      e.index === 0 &&
-      route.model === 'haiku' &&
-      !route.isForced &&
-      e.messageCount > maxContextMessages
-    ) {
-      await $.state.set(ROUTE, { ...route, model: null })
-      announce($, 'router: contexto grande, sin cambio')
-
-      return undefined
-    }
-
     if (e.index === 0) {
       announce(
         $,
-        `router: ${route.model}`,
+        `router: ${route.model}${route.turns === null ? '' : ` · turno ${route.turns}`}`,
         tierOf(e.model) !== route.model ? `Router → ${route.model} (${route.reason})` : undefined,
       )
     }
@@ -138,7 +149,7 @@ function summary(log: TurnRecord[]): string {
 }
 
 export const register: Register = (on, options) => {
-  const maxContextMessages = Number(options.maxContextMessages ?? 12)
+  const maxTurnsToDownshift = Number(options.maxTurnsToDownshift ?? 6)
 
   // Decide una vez, al empezar el turno principal, y deja la decisión en el
   // estado de la sesión. Cada paso del turno la lee, así el modelo no cambia a
@@ -146,7 +157,7 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       try {
-        await $.state.set(ROUTE, decide(e.turnId, e.text))
+        await $.state.set(ROUTE, await decide($, e.turnId, e.text, maxTurnsToDownshift))
       } catch {
         // sin decisión: los pasos no tocan nada
       }
@@ -156,7 +167,7 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.step', async function* ($, e, next) {
-    const model = e.agentId === undefined ? await modelFor($, e, maxContextMessages) : undefined
+    const model = e.agentId === undefined ? await modelFor($, e) : undefined
 
     if (model === undefined) return yield* next(e)
 

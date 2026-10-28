@@ -8,30 +8,15 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.13"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Validar JSON
-        run: |
-          python -m json.tool .claude/settings.json > /dev/null
-          python -m json.tool .claude/router/rules.json > /dev/null
-      - name: Tests
-        run: python -m unittest discover -s tests -v
-
-  mod:
-    # El clasificador del mod (TypeScript) contra los mismos fixtures que el de
-    # Python. Node 22.18+ ejecuta .ts sin flags.
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-      - name: Paridad con el clasificador Python
+          node-version: 22 # 22.18+ ejecuta .ts sin flags
+      - name: Validar JSON
+        run: |
+          for f in .claude-plugin/marketplace.json mods/modslimit-router/.claude-plugin/plugin.json mods/modslimit-router/hooks/hooks.json; do
+            node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "$f"
+          done
+      - name: Clasificador contra los fixtures
         run: node --test tests/test_classify_ts.mjs
