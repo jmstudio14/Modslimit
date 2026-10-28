@@ -5,7 +5,7 @@
 [![CI](https://github.com/jmstudio14/Modslimit/actions/workflows/ci.yml/badge.svg)](https://github.com/jmstudio14/Modslimit/actions/workflows/ci.yml)
 [![Licencia: MIT](https://img.shields.io/badge/licencia-MIT-blue.svg)](LICENSE)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB.svg)
-![Claude Code](https://img.shields.io/badge/Claude%20Code-hooks%20%26%20subagents-D97757.svg)
+![Claude Code](https://img.shields.io/badge/Claude%20Code-hooks%2C%20subagents%20%26%20mods-D97757.svg)
 
 ---
 
@@ -13,6 +13,7 @@
 
 - [Descripción general](#descripción-general)
 - [Arquitectura](#arquitectura)
+- [Mod experimental](#mod-modslimit-router-experimental)
 - [Requisitos](#requisitos)
 - [Instalación](#instalación)
 - [Verificación](#verificación)
@@ -48,7 +49,7 @@ Modslimit clasifica cada prompt en uno de tres niveles y dirige el trabajo al mo
 
 ## Arquitectura
 
-Claude Code no permite cambiar el modelo de la sesión principal en cada prompt. Modslimit combina tres mecanismos nativos para lograr un efecto equivalente:
+Con hooks, Claude Code no puede cambiar el modelo de la sesión principal en cada prompt. La vía compatible con cualquier versión combina tres mecanismos nativos para lograr un efecto equivalente; en versiones con soporte de mods existe además una vía que sí cambia el modelo ([ver más abajo](#mod-modslimit-router-experimental)):
 
 ```
                 ┌─────────────────────────┐
@@ -72,10 +73,42 @@ Claude Code no permite cambiar el modelo de la sesión principal en cada prompt.
 | Reglas | `.claude/router/rules.json` | Palabras clave, nivel por defecto y prefijos manuales |
 | Subagentes | `.claude/agents/*.md` | Agentes con modelo fijo: `haiku-simple`, `sonnet-standard`, `opus-critical` |
 | Política | `CLAUDE.md` | Instrucciones de enrutamiento para la sesión principal |
-| Tests | `tests/` | Suite de verificación del clasificador y la configuración |
+| Mod *(experimental)* | `mods/modslimit-router/` | Elige el modelo de cada turno en vez de sugerirlo |
+| Generador | `scripts/sync_mod_rules.py` | Copia `rules.json` a `rules.ts`, porque el mod no puede leer archivos |
+| Tests | `tests/` | Suite de verificación del clasificador, la configuración y la paridad con el mod |
 | CI | `.github/workflows/ci.yml` | Ejecución automática de la suite en cada cambio |
 
-> **Nota:** fijar Sonnet como modelo principal es, por sí solo, la medida de mayor impacto en el consumo. El enrutamiento por niveles optimiza el resto.
+> **Nota:** fijar Sonnet como modelo principal es, en principio, la medida de mayor impacto, porque la sesión principal concentra la mayor parte del gasto. Es una estimación, no una medición; el enrutamiento por niveles puede optimizar el resto.
+
+---
+
+## Mod `modslimit-router` (experimental)
+
+En versiones de Claude Code con soporte de mods, `mods/modslimit-router/` **elige** el modelo en lugar de sugerirlo. Es la corrección del punto débil del hook: la recomendación del hook depende de que el modelo la obedezca; el mod no.
+
+| Evento | Qué hace |
+|--------|----------|
+| `turn.start` | Clasifica el prompt con las mismas reglas que el hook y guarda la decisión en el estado de la sesión |
+| `turn.step` | Reescribe el modelo de cada petición del turno. La decisión se toma una vez por turno y vale para todos sus pasos |
+| `turn.complete` | Anota los tokens reales de cada turno (últimos 200) para poder medir el ahorro |
+| `/router-stats` | Muestra turnos y tokens por nivel |
+
+**Salvaguardas.** No baja a Haiku si la conversación supera `maxContextMessages` mensajes (12 por defecto, configurable), salvo que fuerces el nivel con `!haiku`. No toca los subagentes, ni los comandos de barra, ni los turnos sin prompt escrito. Si algo falla, el turno sigue con el modelo de la sesión. Según el validador, el mod solo usa `$.state`, `$.store`, `$.clock`, `$.command` y `$.ui`: no accede a red, procesos ni archivos.
+
+**Probarlo** sin instalarlo:
+
+```bash
+claude --plugin-dir mods/modslimit-router
+```
+
+> **Usa el hook o el mod, no los dos.** Con el mod activo el modelo del turno ya está elegido; si el hook y `CLAUDE.md` siguen pidiendo delegar en `haiku-simple` u `opus-critical`, el subagente se suma al cambio de modelo y el trabajo se paga dos veces. Para usar el mod, quita el bloque `hooks` de `.claude/settings.json` y la tabla de enrutamiento de `CLAUDE.md`.
+
+**Estado y riesgos**
+
+- **API temprana.** Los mods son recientes y su documentación avisa de que la API puede cambiar sin previo aviso. El mod está verificado con Claude Code 2.1.312.
+- **Cambiar de modelo tiene un coste.** La caché de prompt no se comparte entre modelos, así que cada cambio obliga a volver a pagar el contexto. De ahí la decisión por turno y el límite de contexto para bajar a Haiku. Si ese umbral es demasiado alto, el cambio puede salir más caro que no hacerlo.
+- **El ahorro no está medido.** `/router-stats` da los tokens por nivel, no el coste: no incluye precios a propósito, porque se quedarían obsoletos. Compáralo con `/cost` antes de fiarte.
+- **Dos clasificadores.** El hook (Python) y el mod (TypeScript) implementan las mismas reglas. Los fixtures de `tests/fixtures/prompts.json` y la comprobación de `rules.ts` en CI evitan que diverjan.
 
 ---
 
@@ -84,6 +117,7 @@ Claude Code no permite cambiar el modelo de la sesión principal en cada prompt.
 - [Claude Code](https://code.claude.com) con soporte de hooks y subagentes.
 - Python 3.10 o superior disponible como `python3` en el `PATH`.
 - Sin dependencias externas: solo biblioteca estándar.
+- Para el mod: una versión de Claude Code con soporte de mods. Node 22.18 o superior solo hace falta para los tests de paridad.
 
 ---
 
@@ -169,24 +203,29 @@ Todas las reglas residen en `.claude/router/rules.json`:
 
 ## Desarrollo
 
-La suite de tests usa solo `unittest` de la biblioteca estándar:
-
 ```bash
-python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -v          # clasificador Python, fixtures y coherencia
+node --test tests/test_classify_ts.mjs            # clasificador del mod contra los mismos fixtures
+python3 scripts/sync_mod_rules.py                 # regenera rules.ts tras tocar rules.json
+claude plugin validate mods/modslimit-router      # manifiesto y llamadas del mod a $
+claude plugin test mods/modslimit-router          # hooks del mod contra el motor
 ```
 
 | Suite | Cubre |
 |-------|-------|
 | `tests/test_classify.py` | Asignación de niveles, prioridad Opus > Haiku, insensibilidad a mayúsculas y tildes, prefijos manuales, límite de longitud, regresiones de falsos positivos y comportamiento del hook ante entradas vacías, comandos de barra o JSON inválido |
 | `tests/test_config.py` | Coherencia entre `settings.json`, `rules.json` y los subagentes: modelos válidos, agentes existentes, *frontmatter* correcto y palabras clave sin duplicados |
+| `tests/test_parity_fixtures.py` y `tests/test_classify_ts.mjs` | Los mismos 20 prompts de `tests/fixtures/prompts.json` dan el mismo nivel en Python y en TypeScript, incluido el límite de longitud medido en caracteres |
+| `tests/test_mod_sync.py` | `rules.ts` es exactamente lo que genera `rules.json` |
+| `mods/modslimit-router/test/` | Los hooks del mod: nivel elegido, decisión por turno, límite de contexto, subagentes, comandos, estado inesperado y `/router-stats` |
 
-GitHub Actions (`.github/workflows/ci.yml`) valida los JSON y ejecuta la suite con Python 3.10 y 3.13 en cada *pull request* y en cada *push* a `main`.
+GitHub Actions (`.github/workflows/ci.yml`) valida los JSON, ejecuta la suite de Python con 3.10 y 3.13 y la paridad en TypeScript con Node 22, en cada *pull request* y en cada *push* a `main`. `claude plugin validate`, `claude plugin test` y `tsc` necesitan el binario de Claude Code y las declaraciones de tipos que él mismo escribe, así que se ejecutan en local.
 
 ---
 
 ## Contribuir
 
-Las propuestas de mejora son bienvenidas mediante *issues* o *pull requests*. Para cambios en las reglas, añade a `tests/test_classify.py` los prompts mal clasificados con su nivel esperado y comprueba que la suite pasa.
+Las propuestas de mejora son bienvenidas mediante *issues* o *pull requests*. Para cambios en las reglas, añade a `tests/fixtures/prompts.json` los prompts mal clasificados con su nivel esperado, ejecuta `python3 scripts/sync_mod_rules.py` y comprueba que pasan las dos suites.
 
 ---
 
