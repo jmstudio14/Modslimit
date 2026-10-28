@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 // Prueba en vivo del mod: lanza `claude -p` desde una carpeta vacía y comprueba
-// a qué modelo va la petición principal de cada prompt y qué anuncia el mod en
+// a qué modelo va la petición principal de cada turno y qué anuncia el mod en
 // la barra de estado.
 //
 //   node tests/live/smoke.mjs                           # usa el mod instalado
 //   node tests/live/smoke.mjs --plugin-dir mods/modslimit-router
-//   node tests/live/smoke.mjs --only simple             # un solo caso
+//   node tests/live/smoke.mjs --only reanudar           # un solo caso
 //
 // No entra en CI: necesita el binario de Claude Code con credenciales y gasta
-// cuota (unos 0,2 $ según la propia CLI, sobre todo el caso de Opus).
+// cuota (unos 0,3 $ según la propia CLI, sobre todo el caso de Opus). Con
+// --plugin-dir, el mod no debe estar instalado a la vez.
 import { spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -24,19 +26,37 @@ const { values } = parseArgs({
 })
 
 if (values.help) {
-  console.log('uso: node tests/live/smoke.mjs [--plugin-dir <carpeta del mod>] [--only simple|estándar|opus]')
+  console.log('uso: node tests/live/smoke.mjs [--plugin-dir <carpeta del mod>] [--only simple|estándar|opus|reanudar]')
   process.exit(0)
 }
 
 const CLAUDE = process.env.CLAUDE_BIN ?? 'claude'
 const pluginArgs = values['plugin-dir'] ? ['--plugin-dir', resolve(values['plugin-dir'])] : []
 
-// `model: 'session'` = el modelo con el que arranca la sesión, tal como lo
-// informa el evento init; el mod no debe tocarlo ni anunciar nada.
+// Cada caso es una conversación; sus turnos comparten sesión. `model` es el
+// modelo esperado de la petición principal y `bar` lo que debe anunciar el mod.
 const CASES = [
-  { name: 'simple', prompt: 'Renombra la variable x a total en: x = 1', model: 'haiku', status: /^router: haiku · turno 1$/ },
-  { name: 'estándar', prompt: 'Explica en una frase qué es una variable', model: 'session', status: null },
-  { name: 'opus', prompt: '!opus responde solo OK', model: 'opus', status: /^router: opus · turno 1$/ },
+  {
+    name: 'simple',
+    turns: [{ prompt: 'Renombra la variable x a total en: x = 1', model: 'haiku', bar: /^router: haiku · turno 1$/ }],
+  },
+  {
+    name: 'estándar',
+    turns: [{ prompt: 'Explica en una frase qué es una variable', model: 'sonnet', bar: /^router: sonnet · turno 1$/ }],
+  },
+  {
+    name: 'opus',
+    turns: [{ prompt: '!opus responde solo OK', model: 'opus', bar: /^router: opus · turno 1$/ }],
+  },
+  {
+    // Al reanudar una sesión, el proceso arranca con el modelo del turno
+    // anterior. Un prompt estándar debe volver a Sonnet igualmente.
+    name: 'reanudar',
+    turns: [
+      { prompt: '!haiku responde solo OK', model: 'haiku', bar: /^router: haiku · turno 1$/ },
+      { prompt: 'Explica en una frase qué es una variable', model: 'sonnet', bar: /^router: sonnet · turno 2$/ },
+    ],
+  },
 ]
 
 const parse = text =>
@@ -52,28 +72,35 @@ const parse = text =>
     })
     .filter(Boolean)
 
+const FIELDS = ['inputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens']
+const tokens = u => FIELDS.reduce((sum, f) => sum + (u[f] ?? 0), 0)
+
+// En una sesión reanudada el uso es acumulado: lo de este turno es la diferencia.
+function usageSince(previous, current) {
+  const out = {}
+
+  for (const [model, u] of Object.entries(current)) {
+    const used = tokens(u) - tokens(previous[model] ?? {})
+    if (used > 0) out[model] = used
+  }
+
+  return out
+}
+
 // La petición principal es la que más tokens de entrada lleva: el prompt fijo
 // de Claude Code pesa decenas de miles, mientras que las llamadas internas de
 // Haiku (títulos, resúmenes) rondan el millar.
-function mainModel(modelUsage) {
-  const size = u => (u.inputTokens ?? 0) + (u.cacheReadInputTokens ?? 0) + (u.cacheCreationInputTokens ?? 0)
-  const [model] = Object.entries(modelUsage).sort((a, b) => size(b[1]) - size(a[1]))[0] ?? []
+const mainModel = used => Object.entries(used).sort((a, b) => b[1] - a[1])[0]?.[0]
 
-  return model
-}
-
-function run(prompt, cwd) {
-  const res = spawnSync(CLAUDE, ['-p', prompt, '--output-format', 'stream-json', '--verbose', ...pluginArgs], {
-    cwd,
-    input: '',
-    encoding: 'utf8',
-    timeout: 180_000,
-    maxBuffer: 64 * 1024 * 1024,
-  })
+function run(prompt, cwd, sessionArgs) {
+  const res = spawnSync(
+    CLAUDE,
+    ['-p', prompt, ...sessionArgs, '--output-format', 'stream-json', '--verbose', ...pluginArgs],
+    { cwd, input: '', encoding: 'utf8', timeout: 180_000, maxBuffer: 64 * 1024 * 1024 },
+  )
   const events = parse(res.stdout ?? '')
 
   return {
-    status: res.status,
     error: res.error?.message ?? (res.status === 0 ? null : (res.stderr ?? '').slice(0, 200)),
     init: events.find(e => e.type === 'system' && e.subtype === 'init'),
     result: events.findLast(e => e.type === 'result'),
@@ -87,19 +114,35 @@ let cost = 0
 
 try {
   for (const c of CASES.filter(c => !values.only || c.name === values.only)) {
-    const r = run(c.prompt, dir)
+    // Id propio: las ejecuciones anidadas heredan el de la sesión que las
+    // lanza, y reanudar ese reanudaría otra conversación.
+    const id = randomUUID()
     const problems = []
+    let previous = {}
+    let previousCost = 0
 
-    if (r.error || !r.result) {
-      problems.push(`la ejecución falló: ${r.error ?? 'sin resultado'}`)
-    } else {
-      cost += r.result.total_cost_usd ?? 0
-      const model = mainModel(r.result.modelUsage ?? {}) ?? ''
-      const expected = c.model === 'session' ? (r.init?.model ?? '') : c.model
+    for (const [i, t] of c.turns.entries()) {
+      const r = run(t.prompt, dir, i === 0 ? ['--session-id', id] : ['--resume', id])
+      const label = c.turns.length > 1 ? `turno ${i + 1}: ` : ''
 
-      if (!model.includes(expected)) problems.push(`modelo ${model || '?'}, se esperaba ${expected}`)
-      if (c.status ? !r.bar.some(t => c.status.test(t)) : r.bar.length > 0) {
-        problems.push(`barra de estado ${JSON.stringify(r.bar)}, se esperaba ${c.status ?? 'nada'}`)
+      if (r.error || !r.result) {
+        problems.push(`${label}la ejecución falló: ${r.error ?? 'sin resultado'}`)
+        break
+      }
+      if (r.init?.session_id !== id) {
+        problems.push(`${label}la sesión usó el id ${r.init?.session_id}, no el propio: se detiene`)
+        break
+      }
+
+      const current = r.result.modelUsage ?? {}
+      const model = mainModel(usageSince(previous, current)) ?? ''
+      cost += (r.result.total_cost_usd ?? 0) - previousCost
+      previous = current
+      previousCost = r.result.total_cost_usd ?? 0
+
+      if (!model.includes(t.model)) problems.push(`${label}modelo ${model || '?'}, se esperaba ${t.model}`)
+      if (!r.bar.some(text => t.bar.test(text))) {
+        problems.push(`${label}barra de estado ${JSON.stringify(r.bar)}, se esperaba ${t.bar}`)
       }
     }
 

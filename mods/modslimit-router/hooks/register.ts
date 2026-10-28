@@ -49,38 +49,43 @@ async function countTurns($: EngineInterface): Promise<number | null> {
   }
 }
 
+type Config = { maxTurnsToDownshift: number; standardModel: 'sonnet' | 'session' }
+
 // Decide el modelo del turno entero, una sola vez, al empezar.
 async function decide(
   $: EngineInterface,
   turnId: string,
   text: string,
-  maxTurnsToDownshift: number,
+  cfg: Config,
 ): Promise<Route | null> {
   // Un turno sin prompt escrito (continuación) o un comando no se enrutan.
   if (text.trim() === '' || text.trimStart().startsWith('/')) return null
 
   const verdict = classify(text, RULES)
   const turns = await countTurns($)
-  // El nivel por defecto es "lo que ya usa la sesión": no se toca, salvo que
-  // lo fuerce el usuario con !sonnet.
-  const isDefault = verdict.tier === RULES.default_tier && !verdict.isForced
+  const isStandard = verdict.tier === RULES.default_tier && !verdict.isForced
+  const isLong = turns !== null && turns > cfg.maxTurnsToDownshift
   // Bajar de modelo en una conversación larga sale caro: hay que volver a pagar
   // todo el contexto en el modelo nuevo. Si no se puede medir, se asume larga.
-  const isTooLong =
-    verdict.tier === 'haiku' &&
-    !verdict.isForced &&
-    (turns === null || turns > maxTurnsToDownshift)
+  const isBlocked = verdict.tier === 'haiku' && !verdict.isForced && (turns === null || isLong)
+  // "Estándar" es Sonnet de forma explícita. Dejar "el modelo de la sesión" no
+  // es estable: al reanudar una sesión, el proceso arranca con el modelo del
+  // último turno, que puede haber sido Haiku u Opus por obra de este mod.
+  const standard = cfg.standardModel === 'sonnet' ? 'sonnet' : null
+  const model = isStandard || isBlocked ? standard : verdict.tier
 
-  if (isTooLong) {
+  if (isBlocked && model === null) {
     announce($, `router: sin cambio, conversación larga${turns === null ? '' : ` · turno ${turns}`}`)
   }
 
   return {
     turnId,
-    model: isDefault || isTooLong ? null : verdict.tier,
+    model,
     isForced: verdict.isForced,
-    reason: verdict.reason,
+    reason: isBlocked ? 'conversación larga, no baja a Haiku' : verdict.reason,
     turns,
+    isLong,
+    isBlocked,
   }
 }
 
@@ -95,10 +100,20 @@ async function modelFor($: EngineInterface, e: Step): Promise<Tier | undefined> 
     }
 
     if (e.index === 0) {
+      const turn = route.turns === null ? '' : ` · turno ${route.turns}`
+      const note = route.isBlocked ? ' · conversación larga, no baja a Haiku' : ''
+      // Subir a Opus en una conversación larga con la caché de Opus fría sale
+      // caro: el primer turno paga de nuevo todo el contexto. No se sabe si está
+      // fría, así que se avisa con condicional y no se bloquea.
+      const warning =
+        route.model === 'opus' && !route.isForced && route.isLong
+          ? ' Conversación larga: si la caché de Opus ya caducó, este turno paga de nuevo todo el contexto.'
+          : ''
+
       announce(
         $,
-        `router: ${route.model}${route.turns === null ? '' : ` · turno ${route.turns}`}`,
-        tierOf(e.model) !== route.model ? `Router → ${route.model} (${route.reason})` : undefined,
+        `router: ${route.model}${turn}${note}`,
+        tierOf(e.model) !== route.model ? `Router → ${route.model} (${route.reason}).${warning}` : undefined,
       )
     }
 
@@ -149,7 +164,10 @@ function summary(log: TurnRecord[]): string {
 }
 
 export const register: Register = (on, options) => {
-  const maxTurnsToDownshift = Number(options.maxTurnsToDownshift ?? 6)
+  const cfg: Config = {
+    maxTurnsToDownshift: Number(options.maxTurnsToDownshift ?? 6),
+    standardModel: options.standardModel === 'session' ? 'session' : 'sonnet',
+  }
 
   // Decide una vez, al empezar el turno principal, y deja la decisión en el
   // estado de la sesión. Cada paso del turno la lee, así el modelo no cambia a
@@ -157,7 +175,7 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       try {
-        await $.state.set(ROUTE, await decide($, e.turnId, e.text, maxTurnsToDownshift))
+        await $.state.set(ROUTE, await decide($, e.turnId, e.text, cfg))
       } catch {
         // sin decisión: los pasos no tocan nada
       }
