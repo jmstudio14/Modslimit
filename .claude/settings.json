@@ -1,0 +1,16 @@
+{
+  "model": "sonnet",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/router/classify.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
