@@ -20,3 +20,5 @@ jobs:
           done
       - name: Clasificador contra los fixtures
         run: node --test tests/test_classify_ts.mjs
+      - name: Formato de la barra de uso
+        run: node --test tests/test_meter.mjs

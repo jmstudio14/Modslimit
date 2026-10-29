@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Prueba en vivo del mod: lanza `claude -p` desde una carpeta vacía y comprueba
 // a qué modelo va la petición principal de cada turno y qué anuncia el mod en
-// la barra de estado.
+// la línea de estado de abajo.
 //
 //   node tests/live/smoke.mjs                           # usa el mod instalado
 //   node tests/live/smoke.mjs --plugin-dir mods/modslimit-router
@@ -38,23 +38,23 @@ const pluginArgs = values['plugin-dir'] ? ['--plugin-dir', resolve(values['plugi
 const CASES = [
   {
     name: 'simple',
-    turns: [{ prompt: 'Renombra la variable x a total en: x = 1', model: 'haiku', bar: /^router: haiku · turno 1$/ }],
+    turns: [{ prompt: 'Renombra la variable x a total en: x = 1', model: 'haiku', bar: /^Haiku \(router\)( · |$)/ }],
   },
   {
     name: 'estándar',
-    turns: [{ prompt: 'Explica en una frase qué es una variable', model: 'sonnet', bar: /^router: sonnet · turno 1$/ }],
+    turns: [{ prompt: 'Explica en una frase qué es una variable', model: 'sonnet', bar: /^Sonnet( \(router\))?( · |$)/ }],
   },
   {
     name: 'opus',
-    turns: [{ prompt: '!opus responde solo OK', model: 'opus', bar: /^router: opus · turno 1$/ }],
+    turns: [{ prompt: '!opus responde solo OK', model: 'opus', bar: /^Opus \(router\)( · |$)/ }],
   },
   {
     // Al reanudar una sesión, el proceso arranca con el modelo del turno
     // anterior. Un prompt estándar debe volver a Sonnet igualmente.
     name: 'reanudar',
     turns: [
-      { prompt: '!haiku responde solo OK', model: 'haiku', bar: /^router: haiku · turno 1$/ },
-      { prompt: 'Explica en una frase qué es una variable', model: 'sonnet', bar: /^router: sonnet · turno 2$/ },
+      { prompt: '!haiku responde solo OK', model: 'haiku', bar: /^Haiku \(router\)( · |$)/ },
+      { prompt: 'Explica en una frase qué es una variable', model: 'sonnet', bar: /^Sonnet \(router\)( · |$)/ },
     ],
   },
 ]
@@ -143,6 +143,10 @@ try {
       if (!model.includes(t.model)) problems.push(`${label}modelo ${model || '?'}, se esperaba ${t.model}`)
       if (!r.bar.some(text => t.bar.test(text))) {
         problems.push(`${label}barra de estado ${JSON.stringify(r.bar)}, se esperaba ${t.bar}`)
+      }
+      // Al terminar el turno la línea ya lleva el contexto y lo gastado.
+      if (!/ctx \S+\/\S+/.test(r.bar.at(-1) ?? '') || !/ tok/.test(r.bar.at(-1) ?? '')) {
+        problems.push(`${label}la última barra no lleva contexto y tokens: ${JSON.stringify(r.bar.at(-1))}`)
       }
     }
 

@@ -1,11 +1,14 @@
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, SessionUsage } from 'claude-code'
 
-import type { Route } from '../types'
+import type { Meter, Route } from '../types'
+import { registerBand } from './band.tsx'
 import { classify } from './classify.ts'
 import type { Tier } from './classify.ts'
+import { buildStatus } from './meter.ts'
 import { RULES } from './rules.ts'
 
 const ROUTE = { plugin: 'modslimit-router', key: 'route' } as const
+const METER = { plugin: 'modslimit-router', key: 'meter' } as const
 const LOG_KEY = 'turns'
 const LOG_LIMIT = 200
 
@@ -26,14 +29,67 @@ type Step = { turnId: string; index: number; model: string }
 const tierOf = (model: string): Tier | undefined =>
   (['haiku', 'sonnet', 'opus'] as const).find(t => model.includes(t))
 
-// La barra de estado y el aviso son cosméticos: si fallan no deben anular el
-// enrutamiento, por eso van aparte de la lógica que decide.
-function announce($: EngineInterface, status: string, toast?: string): void {
+// El aviso es cosmético: si falla no debe anular el enrutamiento.
+function notify($: EngineInterface, toast: string): void {
   try {
-    $.ui.status(status)
-    if (toast !== undefined) $.ui.toast(toast)
+    $.ui.toast(toast)
   } catch {
-    // sin avisos
+    // sin aviso
+  }
+}
+
+const EMPTY: Meter = {
+  model: null,
+  isRouted: false,
+  note: null,
+  turns: null,
+  contextTokens: null,
+  contextWindow: null,
+  contextPercent: null,
+  limits: [],
+  costUsd: null,
+  spent: 0,
+}
+
+// Las cifras que el motor da del uso, en la forma del medidor. Lo que no
+// informa se queda como null o vacío.
+const fromUsage = (u: Pick<SessionUsage, 'context' | 'rateLimits' | 'cost'>): Partial<Meter> => ({
+  contextTokens: u.context.tokens ?? null,
+  contextWindow: u.context.window,
+  contextPercent: u.context.percent ?? null,
+  limits: u.rateLimits.map(l => ({ kind: l.kind, percentUsed: l.percentUsed, resetsAt: l.resetsAt })),
+  costUsd: u.cost?.usd ?? null,
+})
+
+// Pone al día el medidor y la línea de estado de abajo. Medir es opcional: ante
+// cualquier fallo el turno sigue como si el mod no estuviera. `usage` son las
+// cifras del evento; sin ellas se pregunta al motor.
+async function track(
+  $: EngineInterface,
+  isEnabled: boolean,
+  patch: Partial<Meter>,
+  extra: { spent?: number; usage?: Pick<SessionUsage, 'context' | 'rateLimits' | 'cost'> } = {},
+): Promise<void> {
+  if (!isEnabled) return
+
+  try {
+    const { value: prev } = await $.state.get(METER)
+    let measured: Partial<Meter> = {}
+    try {
+      measured = fromUsage(extra.usage ?? (await $.session.usage()))
+    } catch {
+      // se conserva lo último que se midió
+    }
+
+    const meter: Meter = { ...(prev ?? EMPTY), ...measured, ...patch }
+    meter.spent = (prev?.spent ?? 0) + (extra.spent ?? 0)
+
+    if (JSON.stringify(prev) !== JSON.stringify(meter)) await $.state.set(METER, meter)
+
+    const line = buildStatus(meter, 0)
+    if (line !== '') $.ui.status(line)
+  } catch {
+    // sin medidor
   }
 }
 
@@ -49,7 +105,7 @@ async function countTurns($: EngineInterface): Promise<number | null> {
   }
 }
 
-type Config = { maxTurnsToDownshift: number; standardModel: 'sonnet' | 'session' }
+type Config = { maxTurnsToDownshift: number; standardModel: 'sonnet' | 'session'; showMeter: boolean }
 
 // Decide el modelo del turno entero, una sola vez, al empezar.
 async function decide(
@@ -74,10 +130,6 @@ async function decide(
   const standard = cfg.standardModel === 'sonnet' ? 'sonnet' : null
   const model = isStandard || isBlocked ? standard : verdict.tier
 
-  if (isBlocked && model === null) {
-    announce($, `router: sin cambio, conversación larga${turns === null ? '' : ` · turno ${turns}`}`)
-  }
-
   return {
     turnId,
     model,
@@ -91,33 +143,34 @@ async function decide(
 
 // Modelo que debe llevar este paso, o undefined para dejar el de la sesión.
 // Falla abierto: ante cualquier error el turno sigue como si el mod no estuviera.
-async function modelFor($: EngineInterface, e: Step): Promise<Tier | undefined> {
+async function modelFor($: EngineInterface, e: Step, cfg: Config): Promise<Tier | undefined> {
   try {
-    const { value: route } = await $.state.get(ROUTE)
-
-    if (route == null || route.turnId !== e.turnId || route.model === null) {
-      return undefined
-    }
+    const { value } = await $.state.get(ROUTE)
+    const route = value != null && value.turnId === e.turnId ? value : null
+    const model = route?.model ?? undefined
 
     if (e.index === 0) {
-      const turn = route.turns === null ? '' : ` · turno ${route.turns}`
-      const note = route.isBlocked ? ' · conversación larga, no baja a Haiku' : ''
-      // Subir a Opus en una conversación larga con la caché de Opus fría sale
-      // caro: el primer turno paga de nuevo todo el contexto. No se sabe si está
-      // fría, así que se avisa con condicional y no se bloquea.
-      const warning =
-        route.model === 'opus' && !route.isForced && route.isLong
-          ? ' Conversación larga: si la caché de Opus ya caducó, este turno paga de nuevo todo el contexto.'
-          : ''
+      await track($, cfg.showMeter, {
+        model: model ?? e.model,
+        isRouted: model !== undefined && tierOf(e.model) !== model,
+        note: route?.isBlocked ? 'conversación larga, no baja a Haiku' : null,
+        turns: route?.turns ?? null,
+      })
 
-      announce(
-        $,
-        `router: ${route.model}${turn}${note}`,
-        tierOf(e.model) !== route.model ? `Router → ${route.model} (${route.reason}).${warning}` : undefined,
-      )
+      if (route !== null && model !== undefined && tierOf(e.model) !== model) {
+        // Subir a Opus en una conversación larga con la caché de Opus fría sale
+        // caro: el primer turno paga de nuevo todo el contexto. No se sabe si está
+        // fría, así que se avisa con condicional y no se bloquea.
+        const warning =
+          model === 'opus' && !route.isForced && route.isLong
+            ? ' Conversación larga: si la caché de Opus ya caducó, este turno paga de nuevo todo el contexto.'
+            : ''
+
+        notify($, `Router → ${model} (${route.reason}).${warning}`)
+      }
     }
 
-    return route.model
+    return model
   } catch {
     return undefined
   }
@@ -167,6 +220,7 @@ export const register: Register = (on, options) => {
   const cfg: Config = {
     maxTurnsToDownshift: Number(options.maxTurnsToDownshift ?? 6),
     standardModel: options.standardModel === 'session' ? 'session' : 'sonnet',
+    showMeter: options.showMeter !== false,
   }
 
   // Decide una vez, al empezar el turno principal, y deja la decisión en el
@@ -185,7 +239,7 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.step', async function* ($, e, next) {
-    const model = e.agentId === undefined ? await modelFor($, e) : undefined
+    const model = e.agentId === undefined ? await modelFor($, e, cfg) : undefined
 
     if (model === undefined) return yield* next(e)
 
@@ -198,10 +252,23 @@ export const register: Register = (on, options) => {
 
     if (e.agentId === undefined && e.usage !== undefined) {
       await record($, { turnId: e.turnId, usage: e.usage })
+      // Gastado = lo que cuesta de verdad: entrada nueva, escritura de caché y
+      // salida. La lectura de caché se repite en cada turno y no se suma.
+      const { input_tokens, output_tokens, cache_creation_input_tokens = 0 } = e.usage
+      await track($, cfg.showMeter, { model: e.usage.model }, { spent: input_tokens + cache_creation_input_tokens + output_tokens })
     }
 
     return answer
   })
+
+  // El motor avisa tras cada turno principal y cuando un límite sube un punto.
+  on('session.measure', async ($, e, next) => {
+    await track($, cfg.showMeter, {}, { usage: e })
+
+    return next(e)
+  })
+
+  registerBand(on, cfg.showMeter)
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
