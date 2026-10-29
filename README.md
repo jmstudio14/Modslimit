@@ -13,6 +13,7 @@
 - [Qué hace](#qué-hace)
 - [Instalación](#instalación)
 - [Uso](#uso)
+- [Barra de uso](#barra-de-uso)
 - [Cómo funciona](#cómo-funciona)
 - [Configuración](#configuración)
 - [Verificado en una sesión real](#verificado-en-una-sesión-real)
@@ -72,10 +73,35 @@ El enrutamiento es automático. Para forzar un nivel, inicia el prompt con un pr
 | `!sonnet` | Fuerza Sonnet |
 | `!opus` | Fuerza Opus |
 
-- **Barra de estado.** Muestra siempre el modelo que fija: `router: haiku · turno 3`. Cuando una tarea simple se queda en Sonnet por ser la conversación larga, lo dice: `router: sonnet · turno 9 · conversación larga, no baja a Haiku`. Además, un aviso (`toast`) cuando el modelo cambia respecto al que traía la petición. Al subir a Opus en una conversación larga, el aviso añade que, si la caché de Opus ya caducó, ese turno paga de nuevo todo el contexto.
+- **Línea de estado** (abajo del todo en Claude Code). Lleva el modelo en uso, el contexto, los límites del plan y lo gastado: ver [Barra de uso](#barra-de-uso). Cuando una tarea simple se queda en Sonnet por ser la conversación larga, lo dice: `Sonnet (router) · conversación larga, no baja a Haiku · …`. Además, un aviso (`toast`) cuando el modelo cambia respecto al que traía la petición. Al subir a Opus en una conversación larga, el aviso añade que, si la caché de Opus ya caducó, ese turno paga de nuevo todo el contexto.
 - **`/router-stats`** resume los tokens por nivel de los últimos 200 turnos. No incluye precios a propósito, porque se quedarían obsoletos: compáralo con `/cost`.
 
 Los comandos de barra (`/help`, `/model`…) y los turnos sin prompt escrito no se enrutan, ni los subagentes.
+
+---
+
+## Barra de uso
+
+Desde la 0.4.0 el mod enseña qué modelo usa y cuánto llevas gastado y te queda:
+
+```text
+Haiku (router) · ctx 43,1k/1M 4 % · 5 h 86 % · 7 d 59 % · 17,1k tok · <0,01 $
+```
+
+| Dato | Qué es | De dónde sale |
+|------|--------|---------------|
+| `Haiku (router)` | Modelo de la petición; `(router)` si lo cambió el mod | El que fija el mod, y al terminar el turno el que informa la API |
+| `ctx 43,1k/1M 4 %` | Contexto ocupado y ventana del modelo | `$.session.usage()` |
+| `5 h 86 %`, `7 d 59 %` | Porcentaje usado de los límites de tu plan | `$.session.usage()`; solo con suscripción |
+| `17,1k tok` | **Gastado**: entrada nueva + escritura de caché + salida, **sin** lecturas de caché | Suma de cada turno desde que el mod se cargó |
+| `<0,01 $` | Coste de la sesión | `$.session.usage()` |
+
+- **Dónde sale.** La línea de estado, en todas las superficies que la dibujan. Además, una banda sobre el cuadro de texto en **escritorio**, con la hora de reinicio de cada límite (`5 h: 86 % · reinicia en 2 h 10 min`). En el terminal la banda cede el sitio, porque allí la línea de abajo ya lo cubre; VS Code y móvil no la reciben.
+- **Colores.** Contexto y límites pasan a aviso desde el 80 % y a alerta desde el 95 %.
+- **Lo que te queda del plan está en porcentaje, no en tokens.** La API de mods no da el límite del plan en tokens, solo el porcentaje usado y cuándo se reinicia. Con clave de API (sin suscripción) no hay límites y se omiten.
+- **"Gastado" cuenta desde que el mod se carga.** En una sesión reanudada no incluye lo anterior; el coste en $ sí es el de toda la sesión. Las lecturas de caché no se suman porque se repiten en cada turno y casi no cuestan: por eso el primer turno de una sesión muestra decenas de miles (la escritura del prompt de sistema).
+- **Desactivarla:** `showMeter` en `false` (ver [Configuración](#configuración)).
+- **No verificado:** el aspecto de la banda en escritorio. El texto de la línea de estado está comprobado con `claude -p` y la banda con el kit de pruebas del motor, no en una ventana real.
 
 ---
 
@@ -85,7 +111,9 @@ Los comandos de barra (`/help`, `/model`…) y los turnos sin prompt escrito no 
 |--------|----------|
 | `turn.start` | Clasifica el prompt y decide el modelo del turno entero, una sola vez. Lo guarda en el estado de la sesión |
 | `turn.step` | Reescribe el modelo de cada petición del turno con esa decisión |
-| `turn.complete` | Anota los tokens reales del turno |
+| `turn.complete` | Anota los tokens reales del turno y suma lo gastado |
+| `session.measure` | Refresca contexto, límites y coste de la barra de uso |
+| `ui.render` (`AbovePrompt`) | Dibuja la banda de uso en escritorio |
 | `/router-stats` | Muestra turnos y tokens por nivel |
 
 Se decide una vez por turno para no cambiar de modelo a mitad de tarea. Si algo falla, el turno sigue con el modelo que traiga la petición. Según el validador del propio Claude Code, el mod solo usa `$.state`, `$.store`, `$.clock`, `$.command`, `$.session` y `$.ui`: no accede a red, procesos ni archivos.
@@ -115,6 +143,7 @@ Desde el menú de configuración del plugin se ajustan:
 | Opción | Valores | Efecto |
 |--------|---------|--------|
 | `maxTurnsToDownshift` | número, 6 por defecto | Prompts máximos para bajar a Haiku |
+| `showMeter` | `true` (por defecto) o `false` | Muestra u oculta la [barra de uso](#barra-de-uso) |
 | `standardModel` | `sonnet` (por defecto) o `session` | `sonnet`: lo estándar usa Sonnet siempre. `session`: no se toca el modelo de la petición; al reanudar, ese modelo es el del último turno |
 
 ---
@@ -196,7 +225,7 @@ El primer turno en Opus sobre un contexto grande con la caché fría cuesta unas
 
 | Síntoma | Causa probable | Solución |
 |---------|----------------|----------|
-| Nunca aparece `router: …` | El mod no está activo, o las tareas son estándar | Comprueba que `/router-stats` existe; prueba con `!opus responde OK` |
+| No aparece la línea de uso | El mod no está activo o `showMeter` está en `false` | Comprueba que `/router-stats` existe; prueba con `!opus responde OK` |
 | Las tareas simples siguen en Sonnet | Llevas más de `maxTurnsToDownshift` prompts en la sesión | Súbelo en la configuración del plugin o fuerza con `!haiku` |
 | Una tarea se clasifica mal | Palabras clave demasiado amplias o escasas | Ajusta `rules.ts` y añade el caso a `tests/fixtures/prompts.json` |
 | Quiero que lo estándar respete mi `/model` | Por defecto lo estándar usa Sonnet | Pon `standardModel` en `session` |
@@ -207,14 +236,15 @@ El primer turno en Opus sobre un contexto grande con la caché fría cuesta unas
 
 ```bash
 node --test tests/test_classify_ts.mjs          # clasificador contra tests/fixtures/prompts.json
+node --test tests/test_meter.mjs                 # formato de la barra de uso
 claude plugin validate .                         # marketplace, manifiesto y llamadas a $
 claude plugin test mods/modslimit-router         # hooks del mod contra el motor
 node tests/live/smoke.mjs                        # en vivo, con cuota (≈0,3 $): no entra en CI
 ```
 
-Los tests de `mods/modslimit-router/test/` cubren el nivel elegido, la decisión por turno, la salvaguarda de conversación larga (incluido el caso de que el contexto inyectado no la dispare), el arrastre del modelo al reanudar, `standardModel`, los avisos de Opus, subagentes, comandos, estado inesperado y `/router-stats`.
+Los tests de `mods/modslimit-router/test/` cubren el nivel elegido, la decisión por turno, la salvaguarda de conversación larga (incluido el caso de que el contexto inyectado no la dispare), el arrastre del modelo al reanudar, `standardModel`, los avisos de Opus, subagentes, comandos, estado inesperado y `/router-stats`. `test/meter.test.tsx` cubre la línea de estado, lo gastado, `session.measure` y la banda (escritorio, terminal, encuesta, `showMeter`).
 
-GitHub Actions (`.github/workflows/ci.yml`) valida los JSON y ejecuta el clasificador contra los fixtures con Node 22 en cada *pull request* y en cada *push* a `main`. `claude plugin validate`, `claude plugin test` y la prueba en vivo necesitan el binario de Claude Code (y esta última, credenciales), así que se ejecutan en local.
+GitHub Actions (`.github/workflows/ci.yml`) valida los JSON y ejecuta el clasificador y el formato de la barra contra sus tests con Node 22 en cada *pull request* y en cada *push* a `main`. `claude plugin validate`, `claude plugin test` y la prueba en vivo necesitan el binario de Claude Code (y esta última, credenciales), así que se ejecutan en local.
 
 ---
 

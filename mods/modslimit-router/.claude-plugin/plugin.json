@@ -1,7 +1,9 @@
 {
   "name": "modslimit-router",
-  "version": "0.3.0",
-  "author": { "name": "jmstudio14" },
+  "version": "0.4.0",
+  "author": {
+    "name": "jmstudio14"
+  },
   "description": "Elige Haiku, Sonnet u Opus para cada turno según la complejidad del prompt.",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -17,7 +19,16 @@
       "title": "Modelo de las tareas estándar",
       "description": "sonnet: las tareas estándar usan Sonnet siempre, aunque la sesión arranque con otro modelo. session: no se toca el modelo de la sesión; al reanudar una sesión, ese modelo es el del último turno, que puede haber sido Haiku u Opus por el mod.",
       "default": "sonnet",
-      "options": ["sonnet", "session"]
+      "options": [
+        "sonnet",
+        "session"
+      ]
+    },
+    "showMeter": {
+      "type": "boolean",
+      "title": "Barra de uso",
+      "description": "Muestra el modelo en uso, el contexto, los límites del plan y lo gastado: en la línea de estado de abajo y, en escritorio, en una banda sobre el cuadro de texto. Desactívalo para ocultarla.",
+      "default": true
     }
   }
 }
